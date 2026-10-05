@@ -14,7 +14,7 @@
     <!-- Firebase App & Realtime Database SDK (Modular v10 CDN) -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-        import { getDatabase, ref, set, get, child, remove, push } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+        import { getDatabase, ref, set, get, child, remove, push, onValue } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
 
         // =========================================================================
         // KONFIGURASI FIREBASE ANDA (Ganti dengan kredensial Firebase Anda sendiri)
@@ -41,9 +41,10 @@
         window.fbChild = child;
         window.fbRemove = remove;
         window.fbPush = push;
+        window.fbOnValue = onValue;
 
-        // Picu event koneksi firebase siap
-        window.dispatchEvent(new Event('firebase-ready'));
+        // Picu pemuatan data real-time setelah Firebase siap
+        window.loadFirebaseDataRealtime();
     </script>
 
     <script>
@@ -100,7 +101,7 @@
                         <div>
                             <div class="flex items-center gap-2">
                                 <span class="bg-amber-400 text-slate-950 font-black text-[10px] px-2 py-0.5 rounded tracking-widest uppercase shadow-sm">AHASS 12736</span>
-                                <span class="text-xs text-rose-200 font-medium">CRM & Broadcast Digital (Firebase Online)</span>
+                                <span class="text-xs text-rose-200 font-medium">CRM & Broadcast Digital (Firebase Real-Time)</span>
                             </div>
                             <h1 class="text-lg sm:text-xl font-black tracking-tight leading-tight uppercase">AHASS 12736 - Honda Slawi Motor</h1>
                         </div>
@@ -565,29 +566,20 @@
             };
         }
 
-        window.addEventListener('firebase-ready', () => {
-            loadFirebaseData();
-        });
-
-        // Fallback jika event firebase-ready terlewat
-        setTimeout(() => {
-            if (window.fbDb && customers.length === 0) {
-                loadFirebaseData();
-            }
-        }, 1000);
-
-        function loadFirebaseData() {
+        // Fungsi utama untuk memuat & menyinkronkan data secara Real-Time via Firebase onValue
+        function loadFirebaseDataRealtime() {
             if (!window.fbDb) return;
             showToast('Menghubungkan ke database online...');
             
-            // Ambil Data Konsumen
             const dbRef = window.fbRef(window.fbDb);
-            window.fbGet(window.fbChild(dbRef, 'ahass_customers')).then((snapshot) => {
+
+            // Menggunakan onValue agar otomatis update seketika saat ada perubahan dari perangkat lain
+            window.fbOnValue(window.fbChild(dbRef, 'ahass_customers'), (snapshot) => {
                 if (snapshot.exists()) {
                     const data = snapshot.val();
                     customers = Object.values(data);
                 } else {
-                    // Jika database kosong, masukkan data sampel default
+                    // Jika database masih kosong, isi dengan data sampel awal
                     const sample = getInitialAHASSSampleData();
                     window.fbSet(window.fbRef(window.fbDb, 'ahass_customers'), sample);
                     customers = Object.values(sample);
@@ -595,13 +587,13 @@
                 updateStatsAndBadges();
                 renderTopPriorityPanel();
                 renderCustomerList();
-                showToast('Data online berhasil dimuat dari Firebase!');
-            }).catch((error) => {
-                console.error(error);
-                showToast('Gagal memuat data dari Firebase.');
+                showToast('Data berhasil disinkronkan secara online.');
+            }, (error) => {
+                console.error("Firebase Error:", error);
+                showToast('Gagal menyinkronkan data dari Firebase.');
             });
 
-            // Ambil Data Template
+            // Muat Data Template Pesan WhatsApp
             window.fbGet(window.fbChild(dbRef, 'ahass_templates')).then((snapshot) => {
                 if (snapshot.exists()) {
                     templates = snapshot.val();
@@ -616,16 +608,12 @@
             if(confirm('Muat data sampel contoh konsumen AHASS Honda Slawi Motor ke Firebase? Data saat ini akan digantikan.')) {
                 const sample = getInitialAHASSSampleData();
                 window.fbSet(window.fbRef(window.fbDb, 'ahass_customers'), sample).then(() => {
-                    customers = Object.values(sample);
-                    saveCustomersToStorage();
-                    renderCustomerList();
                     showToast('Data demo online berhasil dimuat!');
                 });
             }
         }
 
         function saveCustomersToStorage() {
-            // Ubah array konsumen menjadi objek dengan key ID untuk struktur Firebase yang bersih
             let custObj = {};
             customers.forEach(c => {
                 custObj[c.id] = c;
@@ -1213,11 +1201,16 @@
                     try {
                         const imported = JSON.parse(e.target.result);
                         if (Array.isArray(imported)) {
-                            customers = imported;
-                            saveCustomersToStorage();
-                            renderCustomerList();
-                            closeImportModal();
-                            showToast('Import database JSON berhasil ke Firebase!');
+                            // Konversi array ke object untuk Firebase
+                            let custObj = {};
+                            imported.forEach((c, idx) => {
+                                const id = c.id || (Date.now() + idx).toString();
+                                custObj[id] = { ...c, id };
+                            });
+                            window.fbSet(window.fbRef(window.fbDb, 'ahass_customers'), custObj).then(() => {
+                                closeImportModal();
+                                showToast('Import database JSON berhasil ke Firebase!');
+                            });
                         }
                     } catch(err) {
                         showToast('Format JSON tidak valid.');
@@ -1229,16 +1222,17 @@
                     try {
                         const text = e.target.result;
                         const lines = text.split('\n');
-                        const newCust = [];
+                        let custObj = {};
 
                         for (let i = 1; i < lines.length; i++) {
                             const line = lines[i].trim();
                             if (!line) continue;
-                            const cols = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(col => col.replace(/^"\vert{}"$/g, '').trim());
+                            const cols = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(col => col.replace(/^"(.*)"$/, '$1').trim());
 
                             if (cols.length >= 6) {
-                                newCust.push({
-                                    id: cols[0] || Date.now().toString() + i,
+                                const id = cols[0] || (Date.now().toString() + i);
+                                custObj[id] = {
+                                    id: id,
                                     name: cols[1] || 'Pelanggan ' + i,
                                     plat: cols[2] || 'G 0000 XX',
                                     motor: cols[3] || 'Honda BeAT',
@@ -1249,16 +1243,15 @@
                                     notes: cols[8] || '',
                                     followedUp: cols[9] === 'Selesai',
                                     lastBroadcast: cols[10] || null
-                                });
+                                };
                             }
                         }
 
-                        if (newCust.length > 0) {
-                            customers = newCust;
-                            saveCustomersToStorage();
-                            renderCustomerList();
-                            closeImportModal();
-                            showToast(`Berhasil import ${newCust.length} data ke Firebase!`);
+                        if (Object.keys(custObj).length > 0) {
+                            window.fbSet(window.fbRef(window.fbDb, 'ahass_customers'), custObj).then(() => {
+                                closeImportModal();
+                                showToast(`Berhasil import data ke Firebase!`);
+                            });
                         }
                     } catch(err) {
                         showToast('Format CSV tidak sesuai.');
